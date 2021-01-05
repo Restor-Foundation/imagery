@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset='utf-8' />
+    <title>Airbus OneAtlas Basemap Demo</title>
+    <meta name='viewport' content='initial-scale=1,maximum-scale=1,user-scalable=no' />
+    <script src='https://api.tiles.mapbox.com/mapbox-gl-js/v1.12.0/mapbox-gl.js'></script>
+    <link href='https://api.tiles.mapbox.com/mapbox-gl-js/v1.12.0/mapbox-gl.css' rel='stylesheet' />
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+        }
+
+        #map {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 100%;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id='map'></div>
+    <script>
+        /*global mapboxgl*/
+        /*global fetch*/
+        let apiKey = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiI2NzlmNzEyOS1mNTRkLTRjZTgtYmRkZi1lZDEyZTliYjFmZmQiLCJhdWQiOiJodHRwczovL29uZWF0bGFzLmRhdGFkb29ycy5uZXQvaWQvcmVzb3VyY2VzIiwiaWRwIjoiVUNBX0FERlMiLCJhdXRoX3RpbWUiOjE2MDc1MjgzMjMsImFtciI6ImV4dGVybmFsIiwic2NvcGUiOlsib3BlbmlkIiwicHJvZmlsZSIsImVtYWlsIiwicm9sZXMiLCJyZWFkIiwid3JpdGUiXSwiaXNzIjoiaHR0cHM6Ly9vbmVhdGxhcy5kYXRhZG9vcnMubmV0L2lkIiwiZXhwIjoxNjM5MDY0MzI0LCJjbGllbnRfaWQiOiJwdGVzdF9leGFtcGxlXzEifQ.GS1zw_RZ_tKHBzevO7bHa7aJLCzYMin5Cnll6UvT2NaSG_f8PayQ45h-VahC0HlYPA67avklEadzMbb_FyNqhctCJxHRUnY0wCrAlJWFFViHPXLO12fVRsSM0SYTstavnWhE39WmL0uE7kOCiNzPiDAKcZFlCMWGeqFLaoIMCp7dY-zV7LIkVgj2jxlZUwfJnwWpF6LHw542Yrc_XKbuB7BAlhwrAtLFtX8OxO0F1QlQ42IUzPMdmKuj462Zlzs_ahyyExiBKL8zranCBYu2HC8mJRQQj0jdi9RbU1KkMw7wBfWEnVJo9JkQEKYa4EjpvVJzaQ7RfKQ7e0WnstulKg';
+        mapboxgl.accessToken = 'pk.eyJ1IjoiYmxpc2h0ZW4iLCJhIjoiMEZrNzFqRSJ9.0QBRA2HxTb8YHErUFRMPZg';
+        var map = new mapboxgl.Map({
+            container: 'map',
+            style: 'mapbox://styles/mapbox/light-v10',
+            zoom: 16,
+            center: [-69.44327483420389, -12.833332930437747],
+            transformRequest: (url, resourceType) => {
+                if (resourceType == 'Tile' && url.startsWith('https://view.geoapi-airbusds.com')) {
+                    return {
+                        url: url,
+                        headers: { 'Authorization': 'Bearer ' + apiKey }
+                    };
+                }
+            }
+        });
+
+        map.on('load', function() {
+            map.addLayer({
+                'id': 'Basemap WMS',
+                'type': 'raster',
+                'source': {
+                    'type': 'raster',
+                    'tiles': [
+                        'https://view.geoapi-airbusds.com/api/v1/map/imagery.wms?bbox={bbox-epsg-3857}&format=image/png&service=WMS&version=1.1.1&request=GetMap&srs=EPSG:3857&transparent=true&width=256&height=256'
+                    ],
+                    'tileSize': 256
+                },
+                'paint': {}
+            }, 'aeroway-line');
+        });
+        map.on('click', async function() {
+            //get the map bounding box
+            const bbox = map.getBounds().toArray().join(",");
+            //make the request to get the images
+            const response = await fetch("https://view.geoapi-airbusds.com/api/v1/images?bbox=" + bbox, { headers: { 'Authorization': 'Bearer ' + apiKey } });
+            console.log(await response.json());
+        });
+    </script>
+
+</body>
+
+</html>
