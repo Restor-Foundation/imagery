@@ -87,64 +87,91 @@
             let row = lat2Row(view.center.y, zoom);
             let col = lng2Col(view.center.x, zoom);
             //load the wayback configuration - this contains the specifications for all of the tiled layers
-            fetch("https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json").then(response => {
-                response.json().then(config => {
-                    //we must now make a tile request to each of the tiled layers to get a response which will tell us whether that tiled service (i.e. version) contain changes to the imagery for this row/col
-                    let urls = [];
-                    for (const item in config) {
-                        urls.push("https://wayback.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tilemap/" + item + "/" + zoom + "/" + row + "/" + col);
+            fetch("https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json").then(async function(response) {
+                const config = await response.json();
+                let versions = [];
+                //add a date to each of the versions
+                for (const version in config) {
+                    const [year, month, day] = config[version].itemTitle.substr(config[version].itemTitle.length - 11, 10).split("-");
+                    //add a date for the version so we can sort on date
+                    versions.push(Object.assign(config[version], { version_date: new Date(year, month - 1, day), version_number: Number(version) }));
+                }
+                //sort by date
+                versions.sort(function(a, b) {
+                    return a.version_date - b.version_date;
+                });
+                //initialise the set of release versions that have local changes
+                let version_numbers_with_local_changes = new Set();
+                //we must iterate through the versions to build up a list of the versions that have local changes - start by getting the latest version number
+                let version_position = versions.length - 1;
+                let local_changes, version_number;
+                do {
+                    //now get the version number
+                    version_number = versions[version_position - 1].version_number;
+                    //get the tilemap request
+                    url = "https://wayback.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tilemap/" + version_number + "/" + zoom + "/" + row + "/" + col;
+                    response = await esriRequest(url);
+                    //see if this version has local changes
+                    local_changes = (response.data.data[0]);
+                    //get the version number with local changes
+                    if (local_changes) {
+                        version_number = (response.data.hasOwnProperty('select')) ? response.data.select[0] : version_number;
+                        //add this version number to the local changes version set
+                        version_numbers_with_local_changes.add(version_number);
+                        //get the position of this release in the version_numbers array
+                        version_position = versions.findIndex(item => (item.version_number === version_number));
                     }
-                    //make the requests
-                    var promises = urls.map(url => esriRequest(url));
-                    //wait until all requests have resolved 
-                    promiseUtils.eachAlways(promises).then(results => {
-                        //get the versions which have local changes together with details of the image that is at the centre of the current mapview extent
-                        getLocalVersions(config, results).then(versions => {
-                            console.log(versions);
-                            //initialise the timeslice
-                            let timeslice = 0;
-                            //add the individual WMTS layers
-                            versions.map((item, index) => {
-                                map.layers.push(new WebTileLayer({
-                                    urlTemplate: item.itemURL,
-                                    id: item.itemID,
-                                    copyright: "ESRI Imagery",
-                                }));
-                            });
-                            //add the date div
-                            imageMetadataDiv = document.createElement("div");
-                            imageMetadataDiv.id = "imageMetadataDiv";
-                            imageMetadataDiv.className = "esri-widget esri-component";
-                            imageMetadataDiv.style.padding = "7px 15px 5px";
-                            view.ui.add(imageMetadataDiv, "top-right");
-                            //set the initial timeslice
-                            setUITimeslice(versions, 0);
-                            //stop the map moving on keyboard events - this should only change the timeslice
-                            view.on("key-down", function(event) {
-                                event.stopPropagation();
-                            });
-                            //get changes to the centre when the view is stationary
-                            watchUtils.whenTrue(view, "stationary", function() {
-                                const latLng = webMercatorUtils.xyToLngLat(view.center.x, view.center.y);
-                                var newurl = window.location.protocol + "//" + window.location.host + window.location.pathname + "?lng=" + latLng[0] + "&lat=" + latLng[1] + "&zoom=" + view.zoom;
-                                window.history.pushState({ path: newurl }, '', newurl);
-                            });
-                            //wire up key down event
-                            document.addEventListener('keydown', function(event) {
-                                var prohibitedKeys = ["ArrowRight", "ArrowLeft"];
-                                var keyPressed = event.key;
-                                if (prohibitedKeys.indexOf(keyPressed) !== -1) {
-                                    //stop the map navigation
-                                    event.stopPropagation();
-                                    //increment/decrement the timeslice
-                                    let step = (keyPressed === "ArrowRight") ? 1 : -1;
-                                    timeslice = (timeslice === 0) ? (step === 1) ? 1 : versions.length - 1 : (timeslice + step) % versions.length;
-                                    //update the ui
-                                    setUITimeslice(versions, timeslice);
-                                }
-                            });
-                        });
-                    });
+                    else { //no more local changes
+                        version_position = 0;
+                    }
+                }
+                while (version_position !== 0);
+                //now we have the version numbers of the versions that have local changes - filter the versions using these numbers
+                versions = versions.filter(item => (version_numbers_with_local_changes.has(item.version_number)));
+                //get the images at the centre of these versions
+                versions = await getCentreImages(versions);
+                //initialise the timeslice
+                let timeslice = 0;
+                //add the individual WMTS layers
+                versions.map((item, index) => {
+                    map.layers.push(new WebTileLayer({
+                        urlTemplate: item.itemURL,
+                        id: item.itemID,
+                        copyright: "ESRI Imagery",
+                    }));
+                });
+                //add the date div
+                imageMetadataDiv = document.createElement("div");
+                imageMetadataDiv.id = "imageMetadataDiv";
+                imageMetadataDiv.className = "esri-widget esri-component";
+                imageMetadataDiv.style.padding = "7px 15px 5px";
+                imageMetadataDiv.style.textAlign = "center";
+                view.ui.add(imageMetadataDiv, "top-right");
+                //set the initial timeslice
+                setUITimeslice(versions, 0);
+                //stop the map moving on keyboard events - this should only change the timeslice
+                view.on("key-down", function(event) {
+                    event.stopPropagation();
+                });
+                //get changes to the centre when the view is stationary
+                watchUtils.whenTrue(view, "stationary", function() {
+                    const latLng = webMercatorUtils.xyToLngLat(view.center.x, view.center.y);
+                    var newurl = window.location.protocol + "//" + window.location.host + window.location.pathname + "?lng=" + latLng[0] + "&lat=" + latLng[1] + "&zoom=" + view.zoom;
+                    window.history.pushState({ path: newurl }, '', newurl);
+                });
+                //wire up key down event
+                document.addEventListener('keydown', function(event) {
+                    var prohibitedKeys = ["ArrowRight", "ArrowLeft"];
+                    var keyPressed = event.key;
+                    if (prohibitedKeys.indexOf(keyPressed) !== -1) {
+                        //stop the map navigation
+                        event.stopPropagation();
+                        //increment/decrement the timeslice
+                        let step = (keyPressed === "ArrowRight") ? 1 : -1;
+                        timeslice = (timeslice === 0) ? (step === 1) ? 1 : versions.length - 1 : (timeslice + step) % versions.length;
+                        //update the ui
+                        setUITimeslice(versions, timeslice);
+                    }
                 });
             });
 
@@ -158,33 +185,8 @@
                 });
             }
 
-            function getLocalVersions(config, results) {
+            function getCentreImages(versions) {
                 return new Promise(resolve => {
-                    //initialise an array to contain the unique versions
-                    const uniqueVersions = [];
-                    //iterate through the results and get the unique versions
-                    let versions = results.map(resolved => {
-                        if (resolved.value.data.hasOwnProperty('select')) {
-                            //get the version value
-                            const version = resolved.value.data.select[0];
-                            //add it to the array if it does not already exist
-                            if (uniqueVersions.indexOf(version) === -1) {
-                                uniqueVersions.push(version);
-                                //return the full version metadata
-                                const [year, month, day] = config[version].itemTitle.substr(config[version].itemTitle.length - 11, 10).split("-");
-                                let retValue = {};
-                                //add a date for the version so we can sort on date
-                                Object.assign(retValue, config[version], { version_date: new Date(year, month - 1, day), version: version });
-                                return retValue;
-                            }
-                        }
-                    });
-                    //remove undefined elements
-                    versions = versions.filter(item => (item !== undefined));
-                    //sort the previous versions by year
-                    versions.sort(function(a, b) {
-                        return a.version_date - b.version_date;
-                    });
                     //get the dates of the imagery for the centre of the map
                     versions = versions.map(version => {
                         let retValue = {};
@@ -255,7 +257,7 @@
                     default:
                         sensor = img.SRC_DESC;
                 }
-                return  img.NICE_DESC + " " + sensor + " (" + img.SRC_RES + "m)&nbsp;&nbsp;&nbsp;&nbsp;" + image_date;
+                return img.NICE_DESC + " " + sensor + " (" + img.SRC_RES + "m)&nbsp;&nbsp;&nbsp;&nbsp;" + image_date + "<br>" + Number(index + 1) + " of " + versions.length + " images";
             }
         });
     </script>
