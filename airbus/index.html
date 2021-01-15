@@ -64,8 +64,32 @@
             const bbox = map.getBounds().toArray().join(",");
             //make the request to get the images
             const response = await fetch("https://view.geoapi-airbusds.com/api/v1/images?bbox=" + bbox, { headers: { 'Authorization': 'Bearer ' + apiKey } });
-            console.log(await response.json());
+            const _json = await response.json();
+            //iterate through the features and create the versions
+            const versions = _json.features.map((feature, index) => {
+                return { sensor: feature.properties.satellite, image_date: feature.properties.acquisitionDate, resolution: feature.properties.resolution, endpoint: feature.properties.wmts, index: index };
+            });
+            console.log(versions);
+            //add the WMTS layers to the map
+            versions.forEach(version => {
+                addLayer(version);
+            });
         });
+
+        function addLayer(version) {
+            const updated_endpoint = version.endpoint + "/tile/1.0.0/4e01c650-dc4d-4524-8fcf-c7794a53fb9b/default/3857/{z}/{y}/{x}";
+            // https://view.geoapi-airbusds.com/api/v1/map/images/3f3bb757d5c1e1a22794713a2ef338678a8ce2aa.wmts/tile/1.0.0/4e01c650-dc4d-4524-8fcf-c7794a53fb9b/default/3857/%7Bz%7D/%7By%7D/%7Bx%7D
+            map.addLayer({
+                "id": "version" + version.index,
+                'type': 'raster',
+                'source': {
+                    type: 'raster',
+                    tiles: [updated_endpoint],
+                    // tiles: [version.endpoint],
+                    tileSize: 256
+                }
+            });
+        }
     </script>
 
 </body>
