@@ -19,17 +19,49 @@
             bottom: 0;
             width: 100%;
         }
+
+        #imageMetadataDiv {
+            background-color: rgb(255, 255, 255);
+            box-shadow: rgba(0, 0, 0, 0.3) 0px 1px 2px 0px;
+            box-sizing: border-box;
+            color: rgb(50, 50, 50);
+            display: block;
+            font-family: "Avenir Next", "Helvetica Neue", Helvetica, Arial, sans-serif;
+            font-size: 14px;
+            height: 48px;
+            line-height: 18.2px;
+            margin-bottom: 10px;
+            padding-bottom: 5px;
+            padding-left: 15px;
+            padding-right: 15px;
+            padding-top: 7px;
+            pointer-events: auto;
+            text-align: center;
+            width: 283.656px;
+            -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
+            align-items: flex-end;
+            flex-direction: column;
+            flex-wrap: nowrap;
+            max-width: 100%;
+            position: absolute;
+            right: 15px;
+            top: 15px;
+            padding: 7px 15px 5px;
+            text-align: center;
+        }
     </style>
 </head>
 
 <body>
 
     <div id='map'></div>
+    <div id="imageMetadataDiv"></div>
     <script>
         /*global mapboxgl*/
         /*global fetch*/
         let apiKey = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiI2NzlmNzEyOS1mNTRkLTRjZTgtYmRkZi1lZDEyZTliYjFmZmQiLCJhdWQiOiJodHRwczovL29uZWF0bGFzLmRhdGFkb29ycy5uZXQvaWQvcmVzb3VyY2VzIiwiaWRwIjoiVUNBX0FERlMiLCJhdXRoX3RpbWUiOjE2MDc1MjgzMjMsImFtciI6ImV4dGVybmFsIiwic2NvcGUiOlsib3BlbmlkIiwicHJvZmlsZSIsImVtYWlsIiwicm9sZXMiLCJyZWFkIiwid3JpdGUiXSwiaXNzIjoiaHR0cHM6Ly9vbmVhdGxhcy5kYXRhZG9vcnMubmV0L2lkIiwiZXhwIjoxNjM5MDY0MzI0LCJjbGllbnRfaWQiOiJwdGVzdF9leGFtcGxlXzEifQ.GS1zw_RZ_tKHBzevO7bHa7aJLCzYMin5Cnll6UvT2NaSG_f8PayQ45h-VahC0HlYPA67avklEadzMbb_FyNqhctCJxHRUnY0wCrAlJWFFViHPXLO12fVRsSM0SYTstavnWhE39WmL0uE7kOCiNzPiDAKcZFlCMWGeqFLaoIMCp7dY-zV7LIkVgj2jxlZUwfJnwWpF6LHw542Yrc_XKbuB7BAlhwrAtLFtX8OxO0F1QlQ42IUzPMdmKuj462Zlzs_ahyyExiBKL8zranCBYu2HC8mJRQQj0jdi9RbU1KkMw7wBfWEnVJo9JkQEKYa4EjpvVJzaQ7RfKQ7e0WnstulKg';
         mapboxgl.accessToken = 'pk.eyJ1IjoiYmxpc2h0ZW4iLCJhIjoiY2tqa2dhd2FnMGR6bjJzczI0cjh1bmZnZCJ9.JHD-EC6-b6d2KSEY2JbDUA';
+        var timeslice = 0;
         var map = new mapboxgl.Map({
             container: 'map',
             style: 'mapbox://styles/mapbox/light-v10',
@@ -42,37 +74,41 @@
                         headers: { 'Authorization': 'Bearer ' + apiKey }
                     };
                 }
-            }
+            },
+            // interactive: false
+            interactive: true
         });
 
-        map.on('load', function() {
-            map.addLayer({
-                'id': 'Basemap WMS',
-                'type': 'raster',
-                'source': {
-                    'type': 'raster',
-                    'tiles': [
-                        'https://view.geoapi-airbusds.com/api/v1/map/imagery.wms?bbox={bbox-epsg-3857}&format=image/png&service=WMS&version=1.1.1&request=GetMap&srs=EPSG:3857&transparent=true&width=256&height=256'
-                    ],
-                    'tileSize': 256
-                },
-                'paint': {}
-            }, 'aeroway-line');
-        });
-        map.on('click', async function() {
+        map.on('load', async function() {
             //get the map bounding box
             const bbox = map.getBounds().toArray().join(",");
             //make the request to get the images
             const response = await fetch("https://view.geoapi-airbusds.com/api/v1/images?bbox=" + bbox, { headers: { 'Authorization': 'Bearer ' + apiKey } });
             const _json = await response.json();
             //iterate through the features and create the versions
-            const versions = _json.features.map((feature, index) => {
-                return { sensor: feature.properties.satellite, image_date: feature.properties.acquisitionDate, resolution: feature.properties.resolution, endpoint: feature.properties.wmts, index: index };
+            const versions = _json.features.map(feature => {
+                return { sensor: feature.properties.satellite, image_date: new Date(feature.properties.acquisitionDate), resolution: feature.properties.resolution, endpoint: feature.properties.wmts };
             });
-            console.log(versions);
+            //sort the images by date
+            versions.sort(function(a, b) {
+                return a.image_date - b.image_date;
+            });
             //add the WMTS layers to the map
-            versions.forEach(version => {
-                addLayer(version);
+            versions.forEach((version, index) => {
+                addLayer(Object.assign(version, version, { index: index }), versions.length);
+            });
+            //show the first version
+            showVersion(versions, 0);
+            //add the event listener to move images
+            document.addEventListener('keydown', function(event) {
+                var keyPressed = event.key;
+                if ((keyPressed === 'ArrowRight') || (keyPressed === 'ArrowLeft')) {
+                    //increment/decrement the timeslice
+                    let step = (keyPressed === "ArrowRight") ? 1 : -1;
+                    timeslice = (timeslice === 0) ? (step === 1) ? 1 : versions.length - 1 : (timeslice + step) % versions.length;
+                    //show the version
+                    showVersion(versions, timeslice);
+                }
             });
         });
 
@@ -87,8 +123,21 @@
                     tiles: [updated_endpoint],
                     // tiles: [version.endpoint],
                     tileSize: 256
+                },
+                'layout': {
+                    'visibility': "none"
                 }
             });
+        }
+
+        function showVersion(versions, timeslice) {
+            //update the ui
+            versions.forEach(version => {
+                var vis = (version.index === timeslice) ? "visible" : "none";
+                map.setLayoutProperty("version" + version.index, 'visibility', vis);
+            });
+            var version = versions[timeslice];
+            document.getElementById("imageMetadataDiv").innerHTML = version.sensor + " (" + version.resolution + "m)&nbsp;&nbsp;&nbsp;&nbsp;" + version.image_date.toLocaleString().substr(0, 10) + "<br/>" + Number(version.index + 1) + " of " + versions.length + " images";
         }
     </script>
 
