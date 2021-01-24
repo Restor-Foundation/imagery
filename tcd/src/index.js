@@ -2,12 +2,14 @@ import React from 'react';
 import ReactDOM from 'react-dom';
 import mapboxgl from 'mapbox-gl';
 import MapboxDraw from "@mapbox/mapbox-gl-draw";
-import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css'
+import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import { CircleMode, DragCircleMode, DirectMode, SimpleSelectMode } from 'mapbox-gl-draw-circle';
 import * as turf from "@turf/turf";
 
+/*global fetch*/
+//constants
 mapboxgl.accessToken = 'pk.eyJ1IjoiYmxpc2h0ZW4iLCJhIjoiMEZrNzFqRSJ9.0QBRA2HxTb8YHErUFRMPZg';
-
+const PYTHON_REST_SERVER_ENDPOINT = 'https://andrewcottam.com:8081/python-rest-server/restor/services/';
 class Application extends React.Component {
   constructor(props) {
     super(props);
@@ -76,7 +78,23 @@ class Application extends React.Component {
       });
     });
   }
+  _get(params) {
+    return new Promise((resolve, reject) => {
+      fetch(PYTHON_REST_SERVER_ENDPOINT + params).then(response => {
+        response.json().then(_json => {
+          console.log(_json);
+        });
+      });
+    });
+  }
 
+  //writes the records to postgis
+  postFeatures() {
+    this._get("set_tcd_feature?_id=" + "wibble4" + "&_longitude=" + "0" + "&_latitude=" + "40" + "&_radius=" + "80" + "&_gee_imageid=" + "gee1234" + "&_entered_by=" + "andrew");
+  }
+  nextImage() {
+    this.postFeatures();
+  }
   render() {
     return (
       <div>
@@ -84,8 +102,9 @@ class Application extends React.Component {
           <div>Longitude: {this.state.lng} | Latitude: {this.state.lat} | Zoom: {this.state.zoom}</div>
         </div>
         <div ref={el => this.mapContainer = el} className='mapContainer' />
+        <div onClick={this.nextImage.bind(this)} className={'next'}>Next</div>
       </div>
-    )
+    );
   }
 }
 
