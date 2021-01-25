@@ -16,9 +16,9 @@ class Application extends React.Component {
   constructor(props) {
     super(props);
     this.state = {
-      lng: -69.446974,
-      lat: -12.834363,
-      zoom: 15
+      lng: -69.44916228299296,
+      lat: -12.833871131544694,
+      zoom: 17
     };
   }
 
@@ -105,8 +105,8 @@ class Application extends React.Component {
   nextImage() {
     this.postFeatures();
     //get the scenes for the next lat/lng
-    // const collectionid = 'GOOGLE/GEO/ALL/SATELLITE/WORLDVIEW3/ORTHO/RGB';
-    const collectionid = 'LANDSAT/LC8_L1T_TOA';
+    const collectionid = 'GOOGLE/GEO/ALL/SATELLITE/WORLDVIEW3/ORTHO/RGB';
+    // const collectionid = 'LANDSAT/LC8_L1T_TOA';
     this._get(GEE_IMAGE_SERVER_ENDPOINT + "getIdsForPoint?lng=" + this.state.lng + "&lat=" + this.state.lat + "&collectionid=" + collectionid).then(json => {
       //the geeImageServer returns quasi-json data
       const sceneIds = eval(json.records.substring(json.records.indexOf("["), json.records.length - 1));
