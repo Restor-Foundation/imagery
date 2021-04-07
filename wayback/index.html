@@ -138,8 +138,20 @@
                         urlTemplate: item.itemURL,
                         id: item.itemID,
                         copyright: "ESRI Imagery",
+                        opacity: 0
                     }));
                 });
+                //poll to see when the map has finished loading all its tiles
+                this.interval = setInterval(function() {
+                    //see if the tiles have finished loading
+                    if (!view.updating) {
+                        clearInterval(this.interval);
+                        map.layers.items.map((layer, index) => {
+                            layer.opacity = (index === 0) ? 1 : 0;
+                        });
+                        console.log("ready");
+                    }
+                }, 1000);
                 //add the date div
                 imageMetadataDiv = document.createElement("div");
                 imageMetadataDiv.id = "imageMetadataDiv";
@@ -181,7 +193,7 @@
                 imageMetadataDiv.innerHTML = setImageDivHTML(versions, timeslice);
                 //get the timeslice layer and make it visible
                 map.layers.items.map((layer, index) => {
-                    layer.visible = (index === timeslice);
+                    if (!view.updating) layer.opacity = (index === timeslice) ? 1 : 0;
                 });
             }
 
