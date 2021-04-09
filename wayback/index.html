@@ -8,7 +8,7 @@
     testUrl: /restor/wayback/index.html?lng=-69.444&lat=-12.834&zoom=17
   -->
     <title>ESRI Wayback Demo</title>
-    <link rel="stylesheet" href="https://js.arcgis.com/4.17/esri/themes/light/main.css" />
+    <link rel="stylesheet" href="https://js.arcgis.com/4.18/esri/themes/light/main.css" />
 
     <style>
         html,
@@ -20,17 +20,36 @@
             width: 100%;
         }
 
+        #loading {
+            padding: 0;
+            margin: 0;
+            height: 100%;
+            width: 100%;
+            background-color: white;
+            text-align: center;
+            display: flex;
+            justify-content: center;
+        }
+        
+        #loadingImg{
+            height:20px;
+            width:20px;
+        }
         .esri-layer-list {
             width: 310px;
         }
+
+        .timesliceTics {
+            width: 3px !important;
+            height: 10px !important;
+        }
     </style>
 
-    <script src="https://js.arcgis.com/4.17/"></script>
+    <script src="https://js.arcgis.com/4.18/"></script>
 
     <script>
         /*global fetch*/
-        /*global URL*/
-        var map, imageMetadataDiv;
+        var map, timeslider, geometry;
 
         function lng2Col(lng, zoom) {
             return Math.floor(((lng + 180) / 360) * Math.pow(2, zoom));
@@ -43,188 +62,179 @@
             );
         }
 
-        function col2Lng(x, z) {
-            return (x / Math.pow(2, z)) * 360 - 180;
+        function createTimeSlider(map, view, TimeSlider, TimeExtent) {
+            //get the wayback dates
+            let waybackDates = map.layers.map(layer => {
+                if (layer.type === "web-tile") {
+                    return new Date(layer.date);
+                }
+            }).items;
+            //filter out the nulls
+            waybackDates = waybackDates.filter(item => { return (item !== undefined); });
+            //get the year dates for the year tic marks
+            const numYears = new Date().getFullYear() - waybackDates[0].getFullYear();
+            const years = Array.from({ length: numYears + 1 }, (x, i) => i + waybackDates[0].getFullYear());
+            const yearTics = years.map(year => {
+                return new Date(year, 0, 1);
+            });
+            //set the time extent
+            const timeExtent = new TimeExtent({
+                start: new Date(waybackDates[0].getFullYear(), 0, 1),
+                end: new Date()
+            });
+            const timesliderContainer = document.createElement("div");
+            timesliderContainer.id = "timeslider";
+            timeslider = new TimeSlider({
+                view: view,
+                container: timesliderContainer,
+                mode: "instant",
+                loop: true,
+                fullTimeExtent: timeExtent,
+                stops: { dates: waybackDates },
+                tickConfigs: [{
+                    mode: "position",
+                    values: waybackDates,
+                    tickCreatedFunction: function(initialValue, tickElement, labelElement) {
+                        tickElement.classList.add("timesliceTics");
+                    }
+                }, {
+                    mode: "position",
+                    values: yearTics,
+                }]
+            });
+            // Add the widget to the top-right corner of the view
+            view.ui.add(timeslider, {
+                position: "bottom-right"
+            });
+            //watch for events on the time slider
+            timeslider.watch("timeExtent", (value) => {
+                //get the timeslice date 
+                const timeslice = new Date(value.start).getTime();
+                //update the layers visibility
+                map.layers.items.forEach(layer => {
+                    //only update the opacity of web tile layers
+                    if (layer.type === "web-tile") layer.opacity = (layer.date.getTime() === timeslice) ? 1 : 0;
+                });
+            });
         }
 
-        function row2lat(y, z) {
-            const n = Math.PI - (2 * Math.PI * y) / Math.pow(2, z);
-            return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
-        }
-
-        require([
-            "esri/Map",
-            "esri/views/MapView",
-            "esri/layers/WebTileLayer",
-            "esri/widgets/LayerList",
-            "esri/core/promiseUtils",
-            "esri/request",
-            "esri/core/watchUtils",
-            "esri/geometry/support/webMercatorUtils"
-        ], function(Map, MapView, WebTileLayer, LayerList, promiseUtils, esriRequest, watchUtils, webMercatorUtils) {
-            //flag to set whether the time series shows wayback versions where the central image changes or where any image in the row/col tile changes (less restrictive)
-            const useCentreImageForChanges = true;
-            //get the lat/long from the query parameters
-            var url = new URL(document.URL);
-            var search_params = url.searchParams;
-            const lat = (search_params.has('lat')) ? Number(search_params.get('lat')) : 0;
-            const lng = (search_params.has('lng')) ? Number(search_params.get('lng')) : 0;
-            let zoom = (search_params.has('zoom')) ? Number(search_params.get('zoom')) : 17;
-            //instantiate a new map
-            map = new Map({
-                basemap: "streets",
-            });
-            //create a map view centred on the lat/long
-            const view = new MapView({
-                container: "viewDiv",
-                map: map,
-                zoom: zoom,
-                center: [lng, lat], //restoration site lng=-69.4447580957905&lat=-12.8342947940155
-            });
-            //focus the view
-            view.focus();
-            //get the col/rows for this lat/long
-            let row = lat2Row(view.center.y, zoom);
-            let col = lng2Col(view.center.x, zoom);
-            //load the wayback configuration - this contains the specifications for all of the tiled layers
-            fetch("https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json").then(async function(response) {
-                const config = await response.json();
-                let versions = [];
-                //add a date to each of the versions
-                for (const version in config) {
-                    const [year, month, day] = config[version].itemTitle.substr(config[version].itemTitle.length - 11, 10).split("-");
-                    //add a date for the version so we can sort on date
-                    versions.push(Object.assign(config[version], { version_date: new Date(year, month - 1, day), version_number: Number(version) }));
-                }
-                //sort by date
-                versions.sort(function(a, b) {
-                    return a.version_date - b.version_date;
-                });
-                //initialise the set of release versions that have local changes
-                let version_numbers_with_local_changes = new Set();
-                //we must iterate through the versions to build up a list of the versions that have local changes - start by getting the latest version number
-                let version_position = versions.length;
-                let local_changes, version_number;
-                do {
-                    //now get the version number
-                    version_number = versions[version_position - 1].version_number;
-                    //get the tilemap request
-                    url = "https://wayback.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tilemap/" + version_number + "/" + zoom + "/" + row + "/" + col;
-                    response = await esriRequest(url);
-                    //see if this version has local changes
-                    local_changes = (response.data.data[0]);
-                    //get the version number with local changes
-                    if (local_changes) {
-                        version_number = (response.data.hasOwnProperty('select')) ? response.data.select[0] : version_number;
-                        //add this version number to the local changes version set
-                        version_numbers_with_local_changes.add(version_number);
-                        //get the position of this release in the version_numbers array
-                        version_position = versions.findIndex(item => (item.version_number === version_number));
-                    }
-                    else { //no more local changes
-                        version_position = 0;
-                    }
-                }
-                while (version_position !== 0);
-                //now we have the version numbers of the versions that have local changes - filter the versions using these numbers
-                versions = versions.filter(item => (version_numbers_with_local_changes.has(item.version_number)));
-                //get the images at the centre of these versions
-                versions = await getCentreImages(versions);
-                //initialise the timeslice
-                let timeslice = 0;
-                //add the individual WMTS layers
-                versions.map((item, index) => {
-                    map.layers.push(new WebTileLayer({
-                        urlTemplate: item.itemURL,
-                        id: item.itemID,
-                        copyright: "ESRI Imagery",
-                        opacity: 0
-                    }));
-                });
-                //poll to see when the map has finished loading all its tiles
-                this.interval = setInterval(function() {
-                    //see if the tiles have finished loading
-                    if (!view.updating) {
-                        clearInterval(this.interval);
-                        map.layers.items.map((layer, index) => {
-                            layer.opacity = (index === 0) ? 1 : 0;
+        function getSiteGeometryLayer(Polygon, Graphic, SimpleFillSymbol, GraphicsLayer) {
+            return new Promise(resolve => {
+                //get the sites geometry
+                fetch("https://api-dot-restor-eco-production.oa.r.appspot.com/api/sites/507").then(function(response) {
+                    response.json().then(json => {
+                        //get the geometry
+                        geometry = json.geometry;
+                        //create a polygon
+                        const polygon = new Polygon({ rings: geometry.coordinates });
+                        //add it to the map
+                        var graphicC = new Graphic({ // graphic with polygon geometry
+                            geometry: polygon,
+                            symbol: new SimpleFillSymbol({
+                                style: "none",
+                                color: "none",
+                                outline: {
+                                    color: [255, 0, 0, 1],
+                                    width: "1px"
+                                }
+                            })
                         });
-                        console.log("ready");
-                    }
-                }, 1000);
-                //add the date div
-                imageMetadataDiv = document.createElement("div");
-                imageMetadataDiv.id = "imageMetadataDiv";
-                imageMetadataDiv.className = "esri-widget esri-component";
-                imageMetadataDiv.style.padding = "7px 15px 5px";
-                imageMetadataDiv.style.textAlign = "center";
-                view.ui.add(imageMetadataDiv, "top-right");
-                //set the initial timeslice
-                setUITimeslice(versions, 0);
-                //stop the map moving on keyboard events - this should only change the timeslice
-                view.on("key-down", function(event) {
-                    event.stopPropagation();
-                });
-                //get changes to the centre when the view is stationary
-                watchUtils.whenTrue(view, "stationary", function() {
-                    const latLng = webMercatorUtils.xyToLngLat(view.center.x, view.center.y);
-                    var newurl = window.location.protocol + "//" + window.location.host + window.location.pathname + "?lng=" + latLng[0] + "&lat=" + latLng[1] + "&zoom=" + view.zoom;
-                    window.history.pushState({ path: newurl }, '', newurl);
-                });
-                //wire up key down event
-                document.addEventListener('keydown', function(event) {
-                    var prohibitedKeys = ["ArrowRight", "ArrowLeft"];
-                    var keyPressed = event.key;
-                    if (prohibitedKeys.indexOf(keyPressed) !== -1) {
-                        //stop the map navigation
-                        event.stopPropagation();
-                        //increment/decrement the timeslice
-                        let step = (keyPressed === "ArrowRight") ? 1 : -1;
-                        timeslice = (timeslice === 0) ? (step === 1) ? 1 : versions.length - 1 : (timeslice + step) % versions.length;
-                        //update the ui
-                        setUITimeslice(versions, timeslice);
-                    }
-                });
-            });
-
-            //updates the UI for a specific timeslice by setting the imageMetadataDiv inner html and the visibility of the map layer
-            function setUITimeslice(versions, timeslice) {
-                //set the date
-                imageMetadataDiv.innerHTML = setImageDivHTML(versions, timeslice);
-                //get the timeslice layer and make it visible
-                map.layers.items.map((layer, index) => {
-                    if (!view.updating) layer.opacity = (index === timeslice) ? 1 : 0;
-                });
-            }
-
-            function getCentreImages(versions) {
-                return new Promise(resolve => {
-                    //get the dates of the imagery for the centre of the map
-                    versions = versions.map(version => {
-                        let retValue = {};
-                        Object.assign(retValue, version, { centreImage: { metadataUrl: version.metadataLayerUrl + "/6/query/query?f=json&where=1%3D1&outFields=SRC_DATE2%2CNICE_DESC%2CSRC_DESC%2CSRC_RES%2CSRC_ACC&geometry=%7B%22spatialReference%22%3A%7B%22latestWkid%22%3A4326%7D%2C%22x%22%3A" + lng + "%2C%22y%22%3A" + lat + "%7D&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&returnGeometry=false" } });
-                        return retValue;
+                        var layer = new GraphicsLayer({
+                            graphics: [graphicC]
+                        });
+                        //return the layer as a promise
+                        resolve(layer);
                     });
-                    //make the requests
-                    var promises = versions.map(version => esriRequest(version.centreImage.metadataUrl));
-                    //wait until all requests have resolved 
-                    promiseUtils.eachAlways(promises).then(results => {
-                        //iterate through the results and get the individual image metadata
-                        results.map(resolved => {
-                            if (resolved.value.data.hasOwnProperty('features') && resolved.value.data.features.length) {
-                                //get the image as a feature
-                                const image = resolved.value.data.features[0];
-                                //get the metadata
-                                const metadata = (image.hasOwnProperty('attributes')) ? image.attributes : {};
-                                //add the date in human readable form
-                                Object.assign(metadata, metadata, { image_date: new Date(metadata.SRC_DATE2) });
-                                //merge the image metadata onto the tiled service version metadata
-                                let version = versions.filter(_v => (_v.centreImage.metadataUrl === resolved.value.url))[0];
-                                //merge the image metadata
-                                Object.assign(version.centreImage, version.centreImage, metadata);
-                            }
+                });
+            });
+        }
+
+        function getWaybackLayers(view, zoom, row, col, lng, lat, esriRequest, WebTileLayer, promiseUtils) {
+            return new Promise(resolve => {
+                //load the wayback configuration - this contains the specifications for all of the tiled layers
+                fetch("https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json").then(async function(response) {
+                    const config = await response.json();
+                    let versions = [];
+                    //add a date to each of the versions
+                    for (const version in config) {
+                        const [year, month, day] = config[version].itemTitle.substr(config[version].itemTitle.length - 11, 10).split("-");
+                        //add a date for the version so we can sort on date
+                        versions.push(Object.assign(config[version], { version_date: new Date(year, month - 1, day), version_number: Number(version) }));
+                    }
+                    //sort by date
+                    versions.sort(function(a, b) {
+                        return a.version_date - b.version_date;
+                    });
+                    //initialise the set of release versions that have local changes
+                    let version_numbers_with_local_changes = new Set();
+                    //we must iterate through the versions to build up a list of the versions that have local changes - start by getting the latest version number
+                    let version_position = versions.length;
+                    let local_changes, version_number, url;
+                    do {
+                        //now get the version number
+                        version_number = versions[version_position - 1].version_number;
+                        //get the tilemap request
+                        url = "https://wayback.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tilemap/" + version_number + "/" + zoom + "/" + row + "/" + col;
+                        response = await esriRequest(url);
+                        //see if this version has local changes
+                        local_changes = (response.data.data[0]);
+                        //get the version number with local changes
+                        if (local_changes) {
+                            version_number = (response.data.hasOwnProperty('select')) ? response.data.select[0] : version_number;
+                            //add this version number to the local changes version set
+                            version_numbers_with_local_changes.add(version_number);
+                            //get the position of this release in the version_numbers array
+                            version_position = versions.findIndex(item => (item.version_number === version_number));
+                        }
+                        else { //no more local changes
+                            version_position = 0;
+                        }
+                    }
+                    while (version_position !== 0);
+                    //now we have the version numbers of the versions that have local changes - filter the versions using these numbers
+                    versions = versions.filter(item => (version_numbers_with_local_changes.has(item.version_number)));
+                    //get the images at the centre of these versions
+                    versions = await getCentreImages(versions, lng, lat, promiseUtils);
+                    //add the individual WMTS layers
+                    const waybackLayers = versions.map(item => {
+                        return new WebTileLayer({
+                            urlTemplate: item.itemURL,
+                            id: item.itemID,
+                            copyright: "ESRI Imagery",
+                            opacity: 0,
+                            date: item.centreImage.image_date
                         });
-                        if (useCentreImageForChanges) {
+                    });
+                    resolve(waybackLayers);
+                });
+
+                function getCentreImages(versions, lng, lat, promiseUtils) {
+                    return new Promise(resolve => {
+                        //get the dates of the imagery for the centre of the map
+                        versions = versions.map(version => {
+                            let retValue = {};
+                            Object.assign(retValue, version, { centreImage: { metadataUrl: version.metadataLayerUrl + "/6/query/query?f=json&where=1%3D1&outFields=SRC_DATE2%2CNICE_DESC%2CSRC_DESC%2CSRC_RES%2CSRC_ACC&geometry=%7B%22spatialReference%22%3A%7B%22latestWkid%22%3A4326%7D%2C%22x%22%3A" + lng + "%2C%22y%22%3A" + lat + "%7D&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&returnGeometry=false" } });
+                            return retValue;
+                        });
+                        //make the requests
+                        var promises = versions.map(version => esriRequest(version.centreImage.metadataUrl));
+                        //wait until all requests have resolved 
+                        promiseUtils.eachAlways(promises).then(results => {
+                            //iterate through the results and get the individual image metadata
+                            results.map(resolved => {
+                                if (resolved.value.data.hasOwnProperty('features') && resolved.value.data.features.length) {
+                                    //get the image as a feature
+                                    const image = resolved.value.data.features[0];
+                                    //get the metadata
+                                    const metadata = (image.hasOwnProperty('attributes')) ? image.attributes : {};
+                                    //add the date in human readable form
+                                    Object.assign(metadata, metadata, { image_date: new Date(metadata.SRC_DATE2) });
+                                    //merge the image metadata onto the tiled service version metadata
+                                    let version = versions.filter(_v => (_v.centreImage.metadataUrl === resolved.value.url))[0];
+                                    //merge the image metadata
+                                    Object.assign(version.centreImage, version.centreImage, metadata);
+                                }
+                            });
                             //initialise a new set to hold the unique image dates
                             let unique_image_dates = new Set();
                             //filter the versions for the latest versions with the image date - the later dates have better contrast for the same image
@@ -236,46 +246,97 @@
                             });
                             //reverse the order again to be chronological again
                             versions = versions.slice(0).reverse();
-                        }
-                        //remove the undefined elements and those which dont have image metadata
-                        versions = versions.filter(item => ((item !== undefined) && (item.centreImage.hasOwnProperty("image_date"))));
-                        //return a value
-                        resolve(versions);
+                            //remove the undefined elements and those which dont have image metadata
+                            versions = versions.filter(item => ((item !== undefined) && (item.centreImage.hasOwnProperty("image_date"))));
+                            //return a value
+                            resolve(versions);
+                        });
                     });
-                });
-            }
-
-            //gets the image div html from the image metadata
-            function setImageDivHTML(versions, index) {
-                let sensor = "";
-                const img = versions[index].centreImage;
-                const image_date = (img.hasOwnProperty("image_date")) ? img.image_date.toLocaleString().substr(0, 10) : "";
-                switch (img.SRC_DESC) {
-                    case 'GE01':
-                        sensor = "GeoEye1";
-                        break;
-                    case 'WV01':
-                        sensor = "WorldView1";
-                        break;
-                    case 'WV02':
-                        sensor = "WorldView2";
-                        break;
-                    case 'WV03':
-                        sensor = "WorldView3";
-                        break;
-                    case 'WV04':
-                        sensor = "WorldView4";
-                        break;
-                    default:
-                        sensor = img.SRC_DESC;
                 }
-                return img.NICE_DESC + " " + sensor + " (" + img.SRC_RES + "m)&nbsp;&nbsp;&nbsp;&nbsp;" + image_date + "<br>" + Number(index + 1) + " of " + versions.length + " images";
-            }
+            });
+        }
+
+        require([
+            "esri/Map", "esri/views/MapView", "esri/layers/WebTileLayer", "esri/widgets/LayerList", "esri/core/promiseUtils", "esri/request", "esri/core/watchUtils", "esri/geometry/support/webMercatorUtils", "esri/widgets/TimeSlider", "esri/TimeExtent", "esri/layers/GraphicsLayer", "esri/Graphic", "esri/symbols/SimpleFillSymbol", "esri/geometry/Polygon", "dojo/dom-style"
+        ], function(Map, MapView, WebTileLayer, LayerList, promiseUtils, esriRequest, watchUtils, webMercatorUtils, TimeSlider, TimeExtent, GraphicsLayer, Graphic, SimpleFillSymbol, Polygon, domStyle) {
+            //get the lat/long from the query parameters
+            var url = new URL(document.URL);
+            var search_params = url.searchParams;
+            // const lat = (search_params.has('lat')) ? Number(search_params.get('lat')) : -12.8342947940155; //peru
+            // const lng = (search_params.has('lng')) ? Number(search_params.get('lng')) : -69.4447580957905; //peru
+            const lat = (search_params.has('lat')) ? Number(search_params.get('lat')) : 47.39358717820227; //zurich
+            const lng = (search_params.has('lng')) ? Number(search_params.get('lng')) : 8.566117018283757; //zurich
+            let zoom = (search_params.has('zoom')) ? Number(search_params.get('zoom')) : 17;
+            //instantiate a new map
+            map = new Map({
+                basemap: "streets",
+            });
+            //create a map view centred on the lat/long
+            const view = new MapView({
+                container: "viewDiv",
+                map: map,
+                zoom: zoom,
+                center: [lng, lat],
+            });
+            //get the col/rows for this lat/long
+            let row = lat2Row(view.center.y, zoom);
+            let col = lng2Col(view.center.x, zoom);
+            //get the site layer which has the sites geometry
+            const siteLayer = getSiteGeometryLayer(Polygon, Graphic, SimpleFillSymbol, GraphicsLayer);
+            //get the wayback configuration and load the versions
+            const waybackLayers = getWaybackLayers(view, zoom, row, col, lng, lat, esriRequest, WebTileLayer, promiseUtils);
+            //build a list of promises for 1) the view to finish loading, 2) the Wayback version to load and 3) the site geometry to load
+            const promises = [view.when(), siteLayer, waybackLayers];
+            promiseUtils.eachAlways(promises).then(results => {
+                //zoom the map to the extent of the site 
+                const siteLyr = results[1].value;
+                const extent = siteLyr.graphics.items[0].geometry.extent;
+                view.goTo(extent);
+                //get the wayback layers
+                const waybackLyrs = results[2].value;
+                //add the wayback layers
+                waybackLyrs.forEach(layer => {
+                    map.add(layer);
+                });
+                //add the site layer
+                map.add(siteLayer);
+                //poll to see when the map has finished loading all its tiles
+                this.interval = setInterval(function() {
+                    //see if the tiles have finished loading
+                    if (!view.updating) {
+                        clearInterval(this.interval);
+                        //create the timeslider
+                        createTimeSlider(map, view, TimeSlider, TimeExtent);
+                        //show the map
+                        domStyle.set("loading", "display", "none");
+                    }
+                }, 1000);
+                //stop the map moving on keyboard events - this should only change the timeslice
+                view.on("key-down", function(event) {
+                    event.stopPropagation();
+                });
+                //wire up key down event
+                document.addEventListener('keydown', function(event) {
+                    var allowedKeys = ["ArrowRight", "ArrowLeft"];
+                    if (allowedKeys.indexOf(event.key) !== -1) {
+                        //stop the map navigation
+                        event.stopPropagation();
+                        //increment/decrement the timeslice
+                        if (event.key === "ArrowRight") {
+                            timeslider.next();
+                        }
+                        else {
+                            timeslider.previous();
+                        }
+                    }
+                });
+            });
         });
     </script>
 </head>
 
 <body>
+    <div id="loading"><img src="loading.gif" id="loadingImg"></div>
     <div id="viewDiv"></div>
 </body>
 
