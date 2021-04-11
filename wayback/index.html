@@ -182,6 +182,151 @@
             );
         }
 
+        function getSiteGeometryLayer(siteid, Polygon, Graphic, SimpleFillSymbol, GraphicsLayer) {
+            return new Promise(async resolve => {
+                //get the sites geometry
+                const response = await fetch("https://api-dot-restor-eco-production.oa.r.appspot.com/api/sites/" + siteid);
+                if (response.status === 404) console.log("Site not found");
+                const json = await response.json();
+                //get the geometry
+                geometry = json.geometry;
+                //create a polygon
+                const polygon = new Polygon({ rings: geometry.coordinates });
+                //add it to the map
+                var graphic = new Graphic({ // graphic with polygon geometry
+                    geometry: polygon,
+                    symbol: new SimpleFillSymbol({
+                        style: "none",
+                        color: "none",
+                        outline: {
+                            color: [220, 220, 220, 1],
+                            width: "2px"
+                        }
+                    })
+                });
+                var layer = new GraphicsLayer({
+                    graphics: [graphic]
+                });
+                //return the layer as a promise
+                resolve(layer);
+            });
+        }
+
+        function getWaybackVersions() {
+            return new Promise(async resolve => {
+                //load the wayback configuration - this contains the specifications for all of the tiled layers
+                const response = await fetch("https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json");
+                const config = await response.json();
+                let versions = [];
+                //add a date to each of the versions
+                for (const version in config) {
+                    const [year, month, day] = config[version].itemTitle.substr(config[version].itemTitle.length - 11, 10).split("-");
+                    //add a date for the version so we can sort on date
+                    versions.push(Object.assign(config[version], { version_date: new Date(year, month - 1, day), version_number: Number(version) }));
+                }
+                //sort by date
+                versions.sort(function(a, b) {
+                    return a.version_date - b.version_date;
+                });
+                resolve(versions);
+            });
+        }
+
+        function getWaybackLayers(view, zoom, row, col, lng, lat, esriRequest, WebTileLayer, promiseUtils) {
+            return new Promise(async resolve => {
+                //load the wayback configuration - this contains the specifications for all of the tiled layers
+                let versions = await getWaybackVersions();
+                //initialise the set of versions that have local changes
+                let version_numbers_with_local_changes = new Set();
+                //we must iterate through the versions to build up a list of the versions that have local changes - start by getting the latest version number
+                let version_position = versions.length;
+                let local_changes, version_number, url, response;
+                do {
+                    //now get the version number
+                    version_number = versions[version_position - 1].version_number;
+                    //get the tilemap request
+                    url = "https://wayback.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tilemap/" + version_number + "/" + zoom + "/" + row + "/" + col;
+                    response = await esriRequest(url);
+                    //see if this version has local changes
+                    local_changes = (response.data.data[0]);
+                    //get the version number with local changes
+                    if (local_changes) {
+                        version_number = (response.data.hasOwnProperty('select')) ? response.data.select[0] : version_number;
+                        //add this version number to the local changes version set
+                        version_numbers_with_local_changes.add(version_number);
+                        //get the position of this version in the version_numbers array
+                        version_position = versions.findIndex(item => (item.version_number === version_number));
+                    }
+                    else { //no more local changes
+                        version_position = 0;
+                    }
+                }
+                while (version_position !== 0);
+                //now we have the version numbers of the versions that have local changes - filter the versions using these numbers
+                let localVersions = versions.filter(item => (version_numbers_with_local_changes.has(item.version_number)));
+                //get the image metadata for the images at the centre of these versions (and add it to the localVersions)
+                localVersions = await getCentreImageMetadata(localVersions, lng, lat, promiseUtils, esriRequest);
+                //add the individual WMTS layers
+                const waybackLayers = localVersions.map(item => {
+                    return new WebTileLayer({
+                        urlTemplate: item.itemURL,
+                        id: item.itemID,
+                        copyright: "ESRI Imagery",
+                        opacity: 0,
+                        date: item.centreImage.image_date
+                    });
+                });
+                //return a value
+                resolve(waybackLayers);
+            });
+        }
+
+        async function getCentreImageMetadata(localVersions, lng, lat, promiseUtils, esriRequest) {
+            return new Promise(async resolve => {
+                //get the dates of the imagery for the centre of the map
+                localVersions = localVersions.map(version => {
+                    let retValue = {};
+                    Object.assign(retValue, version, { centreImage: { metadataUrl: version.metadataLayerUrl + "/6/query/query?f=json&where=1%3D1&outFields=SRC_DATE2%2CNICE_DESC%2CSRC_DESC%2CSRC_RES%2CSRC_ACC&geometry=%7B%22spatialReference%22%3A%7B%22latestWkid%22%3A4326%7D%2C%22x%22%3A" + lng + "%2C%22y%22%3A" + lat + "%7D&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&returnGeometry=false" } });
+                    return retValue;
+                });
+                //make the requests
+                var promises = localVersions.map(version => esriRequest(version.centreImage.metadataUrl));
+                //wait until all requests have resolved 
+                const results = await promiseUtils.eachAlways(promises);
+                //iterate through the results and get the individual image metadata
+                let version, image, metadata;
+                results.map(resolved => {
+                    if (resolved.value.data.hasOwnProperty('features') && resolved.value.data.features.length) {
+                        //get the image as a feature
+                        image = resolved.value.data.features[0];
+                        //get the metadata
+                        metadata = (image.hasOwnProperty('attributes')) ? image.attributes : {};
+                        //add the date in human readable form
+                        Object.assign(metadata, metadata, { image_date: new Date(metadata.SRC_DATE2) });
+                        //merge the image metadata onto the tiled service version metadata
+                        version = localVersions.filter(_v => (_v.centreImage.metadataUrl === resolved.value.url))[0];
+                        //merge the image metadata
+                        Object.assign(version.centreImage, version.centreImage, metadata);
+                    }
+                });
+                //initialise a new set to hold the unique image dates
+                let unique_image_dates = new Set();
+                //filter the localVersions for the latest versions with the image date - the later dates have better contrast for the same image
+                localVersions = localVersions.slice(0).reverse().map(version => {
+                    const retValue = (unique_image_dates.has(version.centreImage.SRC_DATE2)) ? undefined : version;
+                    //add the date to the unique date set
+                    unique_image_dates.add(version.centreImage.SRC_DATE2);
+                    return retValue;
+                });
+                //reverse the order again to be chronological again
+                localVersions = localVersions.slice(0).reverse();
+                //remove the undefined elements and those which dont have image metadata
+                localVersions = localVersions.filter(item => ((item !== undefined) && (item.centreImage.hasOwnProperty("image_date"))));
+                //return a value
+                resolve(localVersions);
+            });
+        }
+
         function createTimeSlider(map, view, TimeSlider, TimeExtent) {
             //get the wayback dates
             let waybackDates = map.layers.map(layer => {
@@ -245,7 +390,7 @@
                     }
                 }]
             });
-            // Add the widget to the top-right corner of the view
+            // Add the widget to the bottom-right corner of the view
             view.ui.add(timeslider, {
                 position: "bottom-right"
             });
@@ -263,154 +408,13 @@
             });
         }
 
-        function getSiteGeometryLayer(Polygon, Graphic, SimpleFillSymbol, GraphicsLayer) {
-            return new Promise(resolve => {
-                //get the sites geometry
-                fetch("https://api-dot-restor-eco-production.oa.r.appspot.com/api/sites/507").then(function(response) {
-                    response.json().then(json => {
-                        //get the geometry
-                        geometry = json.geometry;
-                        //create a polygon
-                        const polygon = new Polygon({ rings: geometry.coordinates });
-                        //add it to the map
-                        var graphicC = new Graphic({ // graphic with polygon geometry
-                            geometry: polygon,
-                            symbol: new SimpleFillSymbol({
-                                style: "none",
-                                color: "none",
-                                outline: {
-                                    color: [220, 220, 220, 1],
-                                    width: "2px"
-                                }
-                            })
-                        });
-                        var layer = new GraphicsLayer({
-                            graphics: [graphicC]
-                        });
-                        //return the layer as a promise
-                        resolve(layer);
-                    });
-                });
-            });
-        }
-
-        function getWaybackLayers(view, zoom, row, col, lng, lat, esriRequest, WebTileLayer, promiseUtils) {
-            return new Promise(resolve => {
-                //load the wayback configuration - this contains the specifications for all of the tiled layers
-                fetch("https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json").then(async function(response) {
-                    const config = await response.json();
-                    let versions = [];
-                    //add a date to each of the versions
-                    for (const version in config) {
-                        const [year, month, day] = config[version].itemTitle.substr(config[version].itemTitle.length - 11, 10).split("-");
-                        //add a date for the version so we can sort on date
-                        versions.push(Object.assign(config[version], { version_date: new Date(year, month - 1, day), version_number: Number(version) }));
-                    }
-                    //sort by date
-                    versions.sort(function(a, b) {
-                        return a.version_date - b.version_date;
-                    });
-                    //initialise the set of release versions that have local changes
-                    let version_numbers_with_local_changes = new Set();
-                    //we must iterate through the versions to build up a list of the versions that have local changes - start by getting the latest version number
-                    let version_position = versions.length;
-                    let local_changes, version_number, url;
-                    do {
-                        //now get the version number
-                        version_number = versions[version_position - 1].version_number;
-                        //get the tilemap request
-                        url = "https://wayback.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tilemap/" + version_number + "/" + zoom + "/" + row + "/" + col;
-                        response = await esriRequest(url);
-                        //see if this version has local changes
-                        local_changes = (response.data.data[0]);
-                        //get the version number with local changes
-                        if (local_changes) {
-                            version_number = (response.data.hasOwnProperty('select')) ? response.data.select[0] : version_number;
-                            //add this version number to the local changes version set
-                            version_numbers_with_local_changes.add(version_number);
-                            //get the position of this release in the version_numbers array
-                            version_position = versions.findIndex(item => (item.version_number === version_number));
-                        }
-                        else { //no more local changes
-                            version_position = 0;
-                        }
-                    }
-                    while (version_position !== 0);
-                    //now we have the version numbers of the versions that have local changes - filter the versions using these numbers
-                    versions = versions.filter(item => (version_numbers_with_local_changes.has(item.version_number)));
-                    //get the images at the centre of these versions
-                    versions = await getCentreImages(versions, lng, lat, promiseUtils);
-                    //add the individual WMTS layers
-                    const waybackLayers = versions.map(item => {
-                        return new WebTileLayer({
-                            urlTemplate: item.itemURL,
-                            id: item.itemID,
-                            copyright: "ESRI Imagery",
-                            opacity: 0,
-                            date: item.centreImage.image_date
-                        });
-                    });
-                    resolve(waybackLayers);
-                });
-
-                function getCentreImages(versions, lng, lat, promiseUtils) {
-                    return new Promise(resolve => {
-                        //get the dates of the imagery for the centre of the map
-                        versions = versions.map(version => {
-                            let retValue = {};
-                            Object.assign(retValue, version, { centreImage: { metadataUrl: version.metadataLayerUrl + "/6/query/query?f=json&where=1%3D1&outFields=SRC_DATE2%2CNICE_DESC%2CSRC_DESC%2CSRC_RES%2CSRC_ACC&geometry=%7B%22spatialReference%22%3A%7B%22latestWkid%22%3A4326%7D%2C%22x%22%3A" + lng + "%2C%22y%22%3A" + lat + "%7D&geometryType=esriGeometryPoint&spatialRel=esriSpatialRelIntersects&returnGeometry=false" } });
-                            return retValue;
-                        });
-                        //make the requests
-                        var promises = versions.map(version => esriRequest(version.centreImage.metadataUrl));
-                        //wait until all requests have resolved 
-                        promiseUtils.eachAlways(promises).then(results => {
-                            //iterate through the results and get the individual image metadata
-                            results.map(resolved => {
-                                if (resolved.value.data.hasOwnProperty('features') && resolved.value.data.features.length) {
-                                    //get the image as a feature
-                                    const image = resolved.value.data.features[0];
-                                    //get the metadata
-                                    const metadata = (image.hasOwnProperty('attributes')) ? image.attributes : {};
-                                    //add the date in human readable form
-                                    Object.assign(metadata, metadata, { image_date: new Date(metadata.SRC_DATE2) });
-                                    //merge the image metadata onto the tiled service version metadata
-                                    let version = versions.filter(_v => (_v.centreImage.metadataUrl === resolved.value.url))[0];
-                                    //merge the image metadata
-                                    Object.assign(version.centreImage, version.centreImage, metadata);
-                                }
-                            });
-                            //initialise a new set to hold the unique image dates
-                            let unique_image_dates = new Set();
-                            //filter the versions for the latest versions with the image date - the later dates have better contrast for the same image
-                            versions = versions.slice(0).reverse().map(version => {
-                                const retValue = (unique_image_dates.has(version.centreImage.SRC_DATE2)) ? undefined : version;
-                                //add the date to the unique date set
-                                unique_image_dates.add(version.centreImage.SRC_DATE2);
-                                return retValue;
-                            });
-                            //reverse the order again to be chronological again
-                            versions = versions.slice(0).reverse();
-                            //remove the undefined elements and those which dont have image metadata
-                            versions = versions.filter(item => ((item !== undefined) && (item.centreImage.hasOwnProperty("image_date"))));
-                            //return a value
-                            resolve(versions);
-                        });
-                    });
-                }
-            });
-        }
-
         require([
             "esri/Map", "esri/views/MapView", "esri/layers/WebTileLayer", "esri/widgets/LayerList", "esri/core/promiseUtils", "esri/request", "esri/core/watchUtils", "esri/geometry/support/webMercatorUtils", "esri/widgets/TimeSlider", "esri/TimeExtent", "esri/layers/GraphicsLayer", "esri/Graphic", "esri/symbols/SimpleFillSymbol", "esri/geometry/Polygon", "dojo/dom-style"
         ], function(Map, MapView, WebTileLayer, LayerList, promiseUtils, esriRequest, watchUtils, webMercatorUtils, TimeSlider, TimeExtent, GraphicsLayer, Graphic, SimpleFillSymbol, Polygon, domStyle) {
             //get the lat/long from the query parameters
             var url = new URL(document.URL);
             var search_params = url.searchParams;
-            // const lat = (search_params.has('lat')) ? Number(search_params.get('lat')) : -12.8342947940155; //peru
-            // const lng = (search_params.has('lng')) ? Number(search_params.get('lng')) : -69.4447580957905; //peru
-            const lat = (search_params.has('lat')) ? Number(search_params.get('lat')) : 47.39358717820227; //zurich
-            const lng = (search_params.has('lng')) ? Number(search_params.get('lng')) : 8.566117018283757; //zurich
+            const siteid = (search_params.has('siteid')) ? Number(search_params.get('siteid')) : 507; //zurich
             let zoom = (search_params.has('zoom')) ? Number(search_params.get('zoom')) : 17;
             //instantiate a new map
             map = new Map({
@@ -419,26 +423,28 @@
             //create a map view centred on the lat/long
             const view = new MapView({
                 container: "viewDiv",
-                map: map,
-                zoom: zoom,
-                center: [lng, lat],
+                map: map
             });
-            //get the col/rows for this lat/long
-            let row = lat2Row(view.center.y, zoom);
-            let col = lng2Col(view.center.x, zoom);
-            //get the site layer which has the sites geometry
-            const siteLayer = getSiteGeometryLayer(Polygon, Graphic, SimpleFillSymbol, GraphicsLayer);
-            //get the wayback configuration and load the versions
-            const waybackLayers = getWaybackLayers(view, zoom, row, col, lng, lat, esriRequest, WebTileLayer, promiseUtils);
-            //build a list of promises for 1) the view to finish loading, 2) the Wayback version to load and 3) the site geometry to load
-            const promises = [view.when(), siteLayer, waybackLayers];
-            promiseUtils.eachAlways(promises).then(results => {
+            //get the site layer which also gets the sites geometry
+            getSiteGeometryLayer(siteid, Polygon, Graphic, SimpleFillSymbol, GraphicsLayer).then(async siteLayer => {
+                //get the site extent
+                const siteExtent = siteLayer.graphics.items[0].geometry.extent;
+                //get the site center lat/lng
+                const lng = siteExtent.center.longitude;
+                const lat = siteExtent.center.latitude;
+                //get the col/rows for this lat/long
+                let row = lat2Row(lat, zoom);
+                let col = lng2Col(lng, zoom);
+                //get the wayback configuration and load the versions
+                const waybackLayers = getWaybackLayers(view, zoom, row, col, lng, lat, esriRequest, WebTileLayer, promiseUtils);
+                //build a list of promises for 1) the view to finish loading, 2) the Wayback layers to load 
+                const promises = [view.when(), waybackLayers];
+                //wait for the promises to resolve
+                const results = await promiseUtils.eachAlways(promises);
                 //zoom the map to the extent of the site 
-                const siteLyr = results[1].value;
-                const extent = siteLyr.graphics.items[0].geometry.extent;
-                view.goTo(extent);
+                view.goTo(siteExtent);
                 //get the wayback layers
-                const waybackLyrs = results[2].value;
+                const waybackLyrs = results[1].value;
                 //add the wayback layers
                 waybackLyrs.forEach(layer => {
                     map.add(layer);
